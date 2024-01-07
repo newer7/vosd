@@ -38,10 +38,7 @@ from projection_head import MLPHead
 from functools import partial
 from models.vit import VisionTransformer
 from models.swin import SwinTransformer
-from models.cait import cait_models
-from models.conemb_vit_daff import VisionTransformer_conemb_daff
-from models.conemb_swin_daff import SwinTransformer_conemb_daff
-from models.conemb_cait_daff import cait_models_conemb_daff
+from models.cait import cait
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
@@ -55,7 +52,7 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument('--arch', default='vit', type=str,
-                        choices=['vit', 'swin', 'cait',  'conemb_vit_daff', 'conemb_swin_daff', 'conemb_cait_daff'] \
+                        choices=['vit', 'swin', 'cait'] \
                                 + torchvision_archs,
                         help="""Name of architecture to train. For quick experiments with ViTs, we recommend using vit_tiny or vit_small.""")
     parser.add_argument('--patch_size', default=4, type=int,
@@ -227,34 +224,6 @@ def train(args):
                                     drop_path_rate=args.drop_path_rate,
                                     norm_layer=partial(nn.LayerNorm, eps=1e-6))
 
-    elif args.arch == 'conemb_vit_daff':
-
-        student = VisionTransformer_conemb_daff(img_size=args.image_size,
-                                                patch_size=args.patch_size,
-                                                in_chans=args.in_channels,
-                                                num_classes=0,
-                                                embed_dim=192,
-                                                depth=9,
-                                                num_heads=12,
-                                                mlp_ratio=2,
-                                                qkv_bias=args.qkv_bias,
-                                                drop_rate=args.drop_rate,
-                                                drop_path_rate=args.drop_path_rate,
-                                                norm_layer=partial(nn.LayerNorm, eps=1e-6))
-
-        teacher = VisionTransformer_conemb_daff(img_size=args.image_size,
-                                                patch_size=args.patch_size,
-                                                in_chans=args.in_channels,
-                                                num_classes=0,
-                                                embed_dim=192,
-                                                depth=9,
-                                                num_heads=12,
-                                                mlp_ratio=2,
-                                                qkv_bias=args.qkv_bias,
-                                                drop_rate=args.drop_rate,
-                                                drop_path_rate=args.drop_path_rate,
-                                                norm_layer=partial(nn.LayerNorm, eps=1e-6))
-
     elif args.arch == 'swin':
 
         mlp_ratio = args.vit_mlp_ratio
@@ -271,44 +240,14 @@ def train(args):
                                   num_heads=[3, 6, 12],
                                   mlp_ratio=mlp_ratio, qkv_bias=True, drop_path_rate=args.drop_path_rate)
 
-    elif args.arch == 'conemb_swin_daff':
-
-        mlp_ratio = args.vit_mlp_ratio
-        window_size = 4
-        patch_size = 2 if args.image_size == 32 else 4
-
-        student = SwinTransformer_conemb_daff(img_size=args.image_size, num_classes=0,
-                                              window_size=window_size, patch_size=patch_size, embed_dim=96,
-                                              depths=[2, 6, 4], num_heads=[3, 6, 12],
-                                              mlp_ratio=mlp_ratio, qkv_bias=True, drop_path_rate=args.drop_path_rate)
-
-        teacher = SwinTransformer_conemb_daff(img_size=args.image_size, num_classes=0,
-                                              window_size=window_size, patch_size=patch_size, embed_dim=96,
-                                              depths=[2, 6, 4], num_heads=[3, 6, 12],
-                                              mlp_ratio=mlp_ratio, qkv_bias=True, drop_path_rate=args.drop_path_rate)
-
     elif args.arch == 'cait':
         patch_size = 4 if args.image_size == 32 else 8
-        student = cait_models(
+        student = cait(
             img_size=args.image_size, patch_size=patch_size, embed_dim=192, depth=24, num_heads=4, mlp_ratio=2,
             qkv_bias=True, num_classes=0,
             drop_path_rate=args.drop_path_rate, norm_layer=partial(nn.LayerNorm, eps=1e-6), init_scale=1e-5,
             depth_token_only=2)
-        teacher = cait_models(
-            img_size=args.image_size, patch_size=patch_size, embed_dim=192, depth=24, num_heads=4, mlp_ratio=2,
-            qkv_bias=True, num_classes=0,
-            drop_path_rate=args.drop_path_rate, norm_layer=partial(nn.LayerNorm, eps=1e-6), init_scale=1e-5,
-            depth_token_only=2)
-
-
-    elif args.arch == 'conemb_cait_daff':
-        patch_size = 4 if args.image_size == 32 else 8
-        student = cait_models_conemb_daff(
-            img_size=args.image_size, patch_size=patch_size, embed_dim=192, depth=24, num_heads=4, mlp_ratio=2,
-            qkv_bias=True, num_classes=0,
-            drop_path_rate=args.drop_path_rate, norm_layer=partial(nn.LayerNorm, eps=1e-6), init_scale=1e-5,
-            depth_token_only=2)
-        teacher = cait_models_conemb_daff(
+        teacher = cait(
             img_size=args.image_size, patch_size=patch_size, embed_dim=192, depth=24, num_heads=4, mlp_ratio=2,
             qkv_bias=True, num_classes=0,
             drop_path_rate=args.drop_path_rate, norm_layer=partial(nn.LayerNorm, eps=1e-6), init_scale=1e-5,

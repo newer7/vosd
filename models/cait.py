@@ -328,7 +328,7 @@ class LayerScale_Block(nn.Module):
     
     
     
-class cait_models_conemb_daff(nn.Module):
+class cait(nn.Module):
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     # with slight modifications to adapt to our cait models
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
