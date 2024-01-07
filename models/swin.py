@@ -9,7 +9,7 @@ Mostly copy-paste from Swin-Transformer libarary:
 https://github.com/facebookresearch/dino
 https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
 """
-
+import math
 import os
 import logging
 import numpy as np
@@ -23,7 +23,7 @@ from functools import partial
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 
-#  improved_MLP
+#  MLP
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -33,7 +33,6 @@ class Mlp(nn.Module):
         self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
-
 
     def forward(self, x):
         x = self.fc1(x)
@@ -178,6 +177,66 @@ class WindowAttention(nn.Module):
 
         module.__flops__ += module.flops(N) * B
 
+# The proposed DAFF
+class DAFF(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.,
+                 kernel_size=3, with_bn=True, with_cls=True):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        # pointwise
+        self.conv1 = nn.Conv2d(in_features, hidden_features, kernel_size=1, stride=1, padding=0)
+        # depthwise
+        self.conv2 = nn.Conv2d(
+            hidden_features, hidden_features, kernel_size=kernel_size, stride=1,
+            padding=(kernel_size - 1) // 2, groups=hidden_features)
+
+        # pointwise
+        self.conv3 = nn.Conv2d(hidden_features, out_features, kernel_size=1, stride=1, padding=0)
+        self.act = act_layer()
+
+        self.bn1 = nn.BatchNorm2d(hidden_features)
+        self.bn2 = nn.BatchNorm2d(hidden_features)
+        self.bn3 = nn.BatchNorm2d(out_features)
+
+        # The reduction ratio is always set to 4
+        self.squeeze = nn.AdaptiveAvgPool2d((1, 1))
+        self.compress = nn.Linear(in_features, in_features // 4)
+        self.excitation = nn.Linear(in_features // 4, in_features)
+        
+        self.with_cls = with_cls
+
+    def forward(self, x):
+        B, N, C = x.size()
+        if self.with_cls:
+            cls_token, tokens = torch.split(x, [1, N - 1], dim=1)
+            x = tokens.reshape(B, int(math.sqrt(N - 1)), int(math.sqrt(N - 1)), C).permute(0, 3, 1, 2)
+        else:
+            x = x.reshape(B, int(math.sqrt(N)), int(math.sqrt(N)), C).permute(0, 3, 1, 2)
+            
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+
+        shortcut = x
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.act(x)
+        x = shortcut + x
+
+        x = self.conv3(x)
+        x = self.bn3(x)
+
+        if self.with_cls:
+            weight = self.squeeze(x).flatten(1).reshape(B, 1, C)
+            weight = self.excitation(self.act(self.compress(weight)))
+            cls_token = cls_token * weight
+    
+            tokens = x.flatten(2).permute(0, 2, 1)
+            out = torch.cat((cls_token, tokens), dim=1)
+        else:
+            out = x.flatten(2).permute(0, 2, 1)
+        return out
 
 class SwinTransformerBlock(nn.Module):
     r"""Swin Transformer Block.
@@ -221,7 +280,7 @@ class SwinTransformerBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = DAFF(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, with_cls=False)
 
         self.H = input_resolution[0]
         self.W = input_resolution[1]
@@ -308,7 +367,7 @@ class SwinTransformerBlock(nn.Module):
 
         x = x.view(B, H * W, C)
 
-        # FFN
+        # DFFN
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
@@ -468,6 +527,88 @@ class BasicLayer(nn.Module):
         return flops
 
 
+# Affine on Conv-style features with shape of [B, C, H, W]
+class Affine(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones([1, dim, 1, 1]), requires_grad=True)
+        self.beta = nn.Parameter(torch.zeros([1, dim, 1, 1]), requires_grad=True)
+
+    def forward(self, x):
+        x = x * self.alpha + self.beta
+        return x
+
+
+def conv3x3(in_planes, out_planes, stride=1):
+    """3x3 convolution with padding"""
+    return torch.nn.Sequential(
+        nn.Conv2d(
+            in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
+        ),
+        nn.SyncBatchNorm(out_planes)
+        # nn.BatchNorm2d(out_planes)
+    )
+
+# The proposed SOPE
+class ConvPatchEmbed(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, init_values=1e-2):
+        super().__init__()
+        ori_img_size = img_size
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
+        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = num_patches
+        self.patches_resolution = patches_resolution
+
+        if patch_size[0] == 16:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim // 8, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 8, embed_dim // 4, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 4, embed_dim // 2, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 2, embed_dim, 2),
+            )
+        elif patch_size[0] == 8:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim // 4, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 4, embed_dim // 2, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 2, embed_dim, 2),
+            )            
+        elif patch_size[0] == 4:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim // 2, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 2, embed_dim, 2),
+            )
+        elif patch_size[0] == 2:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim, 2),
+                nn.GELU(),
+            )
+        else:
+            raise ("For convolutional projection, patch size has to be in [2, 4, 16]")
+        self.pre_affine = Affine(3)
+        self.post_affine = Affine(embed_dim)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        
+        x = self.pre_affine(x)
+        x = self.proj(x)
+        x = self.post_affine(x)
+        
+        Hp, Wp = x.shape[2], x.shape[3]
+        x = x.flatten(2).transpose(1, 2)
+
+        return x
+
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
@@ -502,6 +643,7 @@ class PatchEmbed(nn.Module):
         x = x.flatten(2).transpose(1, 2)  # B Ph*Pw C
         if self.norm is not None:
             x = self.norm(x)
+        #print(x.shape)
         return x
         #return x.transpose(1, 2).reshape(B, C, H, W)
 
@@ -514,7 +656,7 @@ class PatchEmbed(nn.Module):
         return flops
 
 
-class SwinTransformer(nn.Module):
+class SwinTransformer_conemb_daff(nn.Module):
     r""" Swin Transformer
         A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
           https://arxiv.org/pdf/2103.14030
@@ -543,7 +685,7 @@ class SwinTransformer(nn.Module):
                  window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
                  norm_layer=partial(nn.LayerNorm, eps=1e-6), ape=False, patch_norm=True, 
-                 return_all_tokens=False, use_mean_pooling=True, masked_im_modeling=False):
+                 return_all_tokens=False, use_mean_pooling=True, masked_im_modeling=False, convPatchEmbed=True):
 
         super().__init__()
 
@@ -556,10 +698,17 @@ class SwinTransformer(nn.Module):
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.mlp_ratio = mlp_ratio
         self.return_all_tokens = return_all_tokens
+        self.convPatchEmbed = convPatchEmbed
 
-        self.patch_embed = PatchEmbed(
-            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
-            norm_layer=norm_layer if self.patch_norm else None)
+        # Patch Embedding
+        if self.convPatchEmbed:
+            self.patch_embed = ConvPatchEmbed(img_size=img_size, embed_dim=embed_dim, patch_size=patch_size)
+        else:
+            self.patch_embed = PatchEmbed(
+                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
+                norm_layer=norm_layer if self.patch_norm else None)
+            self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches + self.num_tokens, embed_dim))
+
         num_patches = self.patch_embed.num_patches
         patches_resolution = self.patch_embed.patches_resolution
         self.patches_resolution = patches_resolution
@@ -614,7 +763,7 @@ class SwinTransformer(nn.Module):
     def forward(self, x):
         # patch linear embedding
         x = self.patch_embed(x)
-        if self.ape:
+        if not self.convPatchEmbed:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
@@ -632,7 +781,7 @@ class SwinTransformer(nn.Module):
         x = self.patch_embed(x)
         x = x.flatten(2).transpose(1, 2)
         if self.ape:
-            x = x + self.absolute_pos_embed
+            x = x + self.pos_embed
         x = self.pos_drop(x)
 
         if n==1:

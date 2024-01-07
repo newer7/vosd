@@ -1,16 +1,19 @@
+import math
+
 import torch
 import torch.nn as nn
 from functools import partial
 
 from timm.models.vision_transformer import Mlp, PatchEmbed , _cfg
 from timm.models.registry import register_model
-from timm.models.layers import trunc_normal_, DropPath
 from einops.layers.torch import Rearrange
-
+from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 
+
+# 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -20,6 +23,7 @@ class Mlp(nn.Module):
         self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
+ 
 
     def forward(self, x):
         x = self.fc1(x)
@@ -27,8 +31,149 @@ class Mlp(nn.Module):
         x = self.drop(x)
         x = self.fc2(x)
         x = self.drop(x)
+
         return x
 
+# The proposed DAFF
+class DAFF(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.,
+                 kernel_size=3, with_bn=True, with_cls=True):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        # pointwise
+        self.conv1 = nn.Conv2d(in_features, hidden_features, kernel_size=1, stride=1, padding=0)
+        # depthwise
+        self.conv2 = nn.Conv2d(
+            hidden_features, hidden_features, kernel_size=kernel_size, stride=1,
+            padding=(kernel_size - 1) // 2, groups=hidden_features)
+
+        # pointwise
+        self.conv3 = nn.Conv2d(hidden_features, out_features, kernel_size=1, stride=1, padding=0)
+        self.act = act_layer()
+
+        self.bn1 = nn.BatchNorm2d(hidden_features)
+        self.bn2 = nn.BatchNorm2d(hidden_features)
+        self.bn3 = nn.BatchNorm2d(out_features)
+
+        # The reduction ratio is always set to 4
+        self.squeeze = nn.AdaptiveAvgPool2d((1, 1))
+        self.compress = nn.Linear(in_features, in_features // 4)
+        self.excitation = nn.Linear(in_features // 4, in_features)
+        
+        self.with_cls = with_cls
+
+    def forward(self, x):
+        B, N, C = x.size()
+        if self.with_cls:
+            cls_token, tokens = torch.split(x, [1, N - 1], dim=1)
+            x = tokens.reshape(B, int(math.sqrt(N - 1)), int(math.sqrt(N - 1)), C).permute(0, 3, 1, 2)
+        else:
+            x = x.reshape(B, int(math.sqrt(N)), int(math.sqrt(N)), C).permute(0, 3, 1, 2)
+            
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+
+        shortcut = x
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.act(x)
+        x = shortcut + x
+
+        x = self.conv3(x)
+        x = self.bn3(x)
+
+        if self.with_cls:
+            weight = self.squeeze(x).flatten(1).reshape(B, 1, C)
+            weight = self.excitation(self.act(self.compress(weight)))
+            cls_token = cls_token * weight
+    
+            tokens = x.flatten(2).permute(0, 2, 1)
+            out = torch.cat((cls_token, tokens), dim=1)
+        else:
+            out = x.flatten(2).permute(0, 2, 1)
+        return out
+
+# Affine on Conv-style features with shape of [B, C, H, W]
+class Affine(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones([1, dim, 1, 1]), requires_grad=True)
+        self.beta = nn.Parameter(torch.zeros([1, dim, 1, 1]), requires_grad=True)
+
+    def forward(self, x):
+        x = x * self.alpha + self.beta
+        return x
+
+
+def conv3x3(in_planes, out_planes, stride=1):
+    """3x3 convolution with padding"""
+    return torch.nn.Sequential(
+        nn.Conv2d(
+            in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
+        ),
+        nn.SyncBatchNorm(out_planes)
+        # nn.BatchNorm2d(out_planes)
+    )
+
+# The proposed SOPE
+class ConvPatchEmbed(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, init_values=1e-2):
+        super().__init__()
+        ori_img_size = img_size
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = num_patches
+
+        if patch_size[0] == 16:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim // 8, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 8, embed_dim // 4, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 4, embed_dim // 2, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 2, embed_dim, 2),
+            )
+        elif patch_size[0] == 8:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim // 4, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 4, embed_dim // 2, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 2, embed_dim, 2),
+            )
+        elif patch_size[0] == 4:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim // 2, 2),
+                nn.GELU(),
+                conv3x3(embed_dim // 2, embed_dim, 2),
+            )
+        elif patch_size[0] == 2:
+            self.proj = torch.nn.Sequential(
+                conv3x3(3, embed_dim, 2),
+                nn.GELU(),
+            )
+        else:
+            raise ("For convolutional projection, patch size has to be in [2, 4, 16]")
+        self.pre_affine = Affine(3)
+        self.post_affine = Affine(embed_dim)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        x = self.pre_affine(x)
+        x = self.proj(x)
+        x = self.post_affine(x)
+
+        Hp, Wp = x.shape[2], x.shape[3]
+        x = x.flatten(2).transpose(1, 2)
+
+        return x
 
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
@@ -90,7 +235,7 @@ class LayerScale_Block_CA(nn.Module):
     # with slight modifications to add CA and LayerScale
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, Attention_block = Class_Attention,
-                 Mlp_block=Mlp,init_values=1e-4):
+                 Mlp_block=DAFF,init_values=1e-4):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention_block(
@@ -98,7 +243,7 @@ class LayerScale_Block_CA(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp_block(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp_block(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, with_cls=False)
         self.gamma_1 = nn.Parameter(init_values * torch.ones((dim)),requires_grad=True)
         self.gamma_2 = nn.Parameter(init_values * torch.ones((dim)),requires_grad=True)
 
@@ -163,7 +308,7 @@ class LayerScale_Block(nn.Module):
     # with slight modifications to add layerScale
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,Attention_block = Attention_talking_head,
-                 Mlp_block=Mlp,init_values=1e-4):
+                 Mlp_block=DAFF,init_values=1e-4):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention_block(
@@ -171,7 +316,7 @@ class LayerScale_Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp_block(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp_block(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, with_cls=False)
         self.gamma_1 = nn.Parameter(init_values * torch.ones((dim)),requires_grad=True)
         self.gamma_2 = nn.Parameter(init_values * torch.ones((dim)),requires_grad=True)
 
@@ -183,7 +328,7 @@ class LayerScale_Block(nn.Module):
     
     
     
-class cait_models(nn.Module):
+class cait_models_conemb_daff(nn.Module):
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     # with slight modifications to adapt to our cait models
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
@@ -191,24 +336,31 @@ class cait_models(nn.Module):
                  drop_path_rate=0., norm_layer=nn.LayerNorm, global_pool=None,
                  block_layers = LayerScale_Block,
                  block_layers_token = LayerScale_Block_CA,
-                 Patch_layer=PatchEmbed,act_layer=nn.GELU,
-                 Attention_block = Attention_talking_head,Mlp_block=Mlp,
+                 Patch_layer=ConvPatchEmbed,act_layer=nn.GELU,
+                 Attention_block = Attention_talking_head,Mlp_block=DAFF,
                 init_scale=1e-4,
                 Attention_block_token_only=Class_Attention,
-                Mlp_block_token_only= Mlp, 
+                Mlp_block_token_only= DAFF, 
                 depth_token_only=2,
-                mlp_ratio_clstk = 4.0):
+                mlp_ratio_clstk = 4.0, convPatchEmbed=True):
         super().__init__()
         
 
             
         self.num_classes = num_classes
+        self.convPatchEmbed = convPatchEmbed
         self.num_features = self.embed_dim = embed_dim  
         patch_dim = 3 * patch_size ** 2
-        self.patch_embed = nn.Sequential(
-               Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
-               nn.Linear(patch_dim, embed_dim),
-            )
+
+        # Patch Embedding
+        if self.convPatchEmbed:
+            self.patch_embed = Patch_layer(img_size=img_size, embed_dim=embed_dim, patch_size=patch_size)
+        else:
+            self.patch_embed = PatchEmbed(
+                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
+                norm_layer=norm_layer if self.patch_norm else None)
+
+
         #self.patch_embed = Patch_layer(
         #        img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
 
@@ -268,8 +420,9 @@ class cait_models(nn.Module):
         x = self.patch_embed(x)
         b, n, _ = x.shape
         cls_tokens = self.cls_token.expand(B, -1, -1)  
-        
+
         x = x + self.pos_embed[:, :n]
+
         x = self.pos_drop(x)
 
         for i , blk in enumerate(self.blocks):
