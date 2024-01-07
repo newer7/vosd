@@ -37,15 +37,11 @@ from utils import utils_ssl as utils
 from projection_head import MLPHead
 from functools import partial
 from models.vit import VisionTransformer
-from models.life_vit import VisionTransformer_life
-from models.dhvt_vit import VisionTransformer_dhvt
 from models.swin import SwinTransformer
 from models.cait import cait_models
 from models.conemb_vit_daff import VisionTransformer_conemb_daff
 from models.conemb_swin_daff import SwinTransformer_conemb_daff
 from models.conemb_cait_daff import cait_models_conemb_daff
-from models.dhvt_swin import SwinTransformer_dhvt
-from models.conemb_cait_impl import cait_models_conemb_impl
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
@@ -59,8 +55,7 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument('--arch', default='vit', type=str,
-                        choices=['vit', 'swin', 'cait', 'life_vit', 'dhvt_vit', 'conemb_vit_impl', 'conemb_swin_impl',
-                                 'conemb_cait_impl', 'dhvt_swin', 'conemb_vit_daff', 'conemb_swin_daff', 'conemb_cait_daff'] \
+                        choices=['vit', 'swin', 'cait',  'conemb_vit_daff', 'conemb_swin_daff', 'conemb_cait_daff'] \
                                 + torchvision_archs,
                         help="""Name of architecture to train. For quick experiments with ViTs, we recommend using vit_tiny or vit_small.""")
     parser.add_argument('--patch_size', default=4, type=int,
@@ -169,7 +164,7 @@ def train(args):
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
 
-    # ============ preparing data ...     将每张图像变为  10份了（默认）   2*globe  +  8*local============
+    # ============ preparing data============
     transform = DataAugmentation(
         args
     )
@@ -188,12 +183,8 @@ def train(args):
     elif args.dataset == "SVHN":
         dataset = torchvision.datasets.SVHN(root=args.datapath, split='train',
                                             download=True, transform=transform)
-    elif args.dataset == "Aircraft":
-        dataset = datasets.ImageFolder(root=args.datapath, transform=transform)
-    elif args.dataset == "Cars":
-        dataset = datasets.ImageFolder(root=args.datapath, transform=transform)
 
-    #    整个数据集加载
+    #
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -236,7 +227,7 @@ def train(args):
                                     drop_path_rate=args.drop_path_rate,
                                     norm_layer=partial(nn.LayerNorm, eps=1e-6))
 
-    elif args.arch == 'conemb_vit_daff':        #conemb_vit_impl
+    elif args.arch == 'conemb_vit_daff':
 
         student = VisionTransformer_conemb_daff(img_size=args.image_size,
                                                 patch_size=args.patch_size,
@@ -280,23 +271,7 @@ def train(args):
                                   num_heads=[3, 6, 12],
                                   mlp_ratio=mlp_ratio, qkv_bias=True, drop_path_rate=args.drop_path_rate)
 
-    elif args.arch == 'dhvt_swin':
-
-        mlp_ratio = args.vit_mlp_ratio
-        window_size = 4
-        patch_size = 2 if args.image_size == 32 else 4
-
-        student = SwinTransformer_dhvt(img_size=args.image_size, num_classes=0,
-                                       window_size=window_size, patch_size=patch_size, embed_dim=96, depths=[2, 6, 4],
-                                       num_heads=[3, 6, 12],
-                                       mlp_ratio=mlp_ratio, qkv_bias=True, drop_path_rate=args.drop_path_rate)
-
-        teacher = SwinTransformer_dhvt(img_size=args.image_size, num_classes=0,
-                                       window_size=window_size, patch_size=patch_size, embed_dim=96, depths=[2, 6, 4],
-                                       num_heads=[3, 6, 12],
-                                       mlp_ratio=mlp_ratio, qkv_bias=True, drop_path_rate=args.drop_path_rate)
-
-    elif args.arch == 'conemb_swin_daff':         #conemb_swin_impl
+    elif args.arch == 'conemb_swin_daff':
 
         mlp_ratio = args.vit_mlp_ratio
         window_size = 4
@@ -326,7 +301,7 @@ def train(args):
             depth_token_only=2)
 
 
-    elif args.arch == 'conemb_cait_daff':     #conemb_cait_impl
+    elif args.arch == 'conemb_cait_daff':
         patch_size = 4 if args.image_size == 32 else 8
         student = cait_models_conemb_daff(
             img_size=args.image_size, patch_size=patch_size, embed_dim=192, depth=24, num_heads=4, mlp_ratio=2,
@@ -338,62 +313,6 @@ def train(args):
             qkv_bias=True, num_classes=0,
             drop_path_rate=args.drop_path_rate, norm_layer=partial(nn.LayerNorm, eps=1e-6), init_scale=1e-5,
             depth_token_only=2)
-
-    elif args.arch == 'dhvt_vit':
-        student = VisionTransformer_dhvt(img_size=args.image_size,
-                                         patch_size=args.patch_size,
-                                         in_chans=args.in_channels,
-                                         num_classes=0,
-                                         embed_dim=192,
-                                         depth=9,
-                                         num_heads=12,
-                                         mlp_ratio=2,
-                                         qkv_bias=args.qkv_bias,
-                                         drop_rate=args.drop_rate,
-                                         drop_path_rate=args.drop_path_rate,
-                                         norm_layer=partial(nn.LayerNorm, eps=1e-6))
-
-        teacher = VisionTransformer_dhvt(img_size=args.image_size,
-                                         patch_size=args.patch_size,
-                                         in_chans=args.in_channels,
-                                         num_classes=0,
-                                         embed_dim=192,
-                                         depth=9,
-                                         num_heads=12,
-                                         mlp_ratio=2,
-                                         qkv_bias=args.qkv_bias,
-                                         drop_rate=args.drop_rate,
-                                         drop_path_rate=args.drop_path_rate,
-                                         norm_layer=partial(nn.LayerNorm, eps=1e-6))
-
-    elif args.arch == 'life_vit':
-        student = VisionTransformer_life(img_size=args.image_size,
-                                         patch_size=args.patch_size,
-                                         in_chans=args.in_channels,
-                                         num_classes=0,
-                                         embed_dim=192,
-                                         depth=9,
-                                         num_heads=12,
-                                         mlp_ratio=2,
-                                         qkv_bias=args.qkv_bias,
-                                         drop_rate=args.drop_rate,
-                                         drop_path_rate=args.drop_path_rate,
-                                         norm_layer=partial(nn.LayerNorm, eps=1e-6))
-
-        teacher = VisionTransformer_life(img_size=args.image_size,
-                                         patch_size=args.patch_size,
-                                         in_chans=args.in_channels,
-                                         num_classes=0,
-                                         embed_dim=192,
-                                         depth=9,
-                                         num_heads=12,
-                                         mlp_ratio=2,
-                                         qkv_bias=args.qkv_bias,
-                                         drop_rate=args.drop_rate,
-                                         drop_path_rate=args.drop_path_rate,
-                                         norm_layer=partial(nn.LayerNorm, eps=1e-6))
-
-
     else:
         print(f"Unknow architecture: {args.arch}")
 
@@ -680,10 +599,6 @@ class DataAugmentation(object):
             mean, std = (0.47889522, 0.47227842, 0.43047404), (0.24205776, 0.23828046, 0.25874835)
         elif args.dataset == "Tiny-Imagenet":
             mean, std = (0.4802, 0.4481, 0.3975), (0.2770, 0.2691, 0.2821)
-        elif args.dataset == "Aircraft":
-            mean, std = (0.4796, 0.5108, 0.5341), (0.2172, 0.2103, 0.2425)
-        elif args.dataset == "Cars":
-            mean, std = (0.4708, 0.4602, 0.4550), (0.2892, 0.2882, 0.2968)
 
         flip_and_color_jitter = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),

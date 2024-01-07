@@ -48,22 +48,6 @@ def datainfo(logger, args):
         img_mean, img_std =(0.47889522, 0.47227842, 0.43047404),(0.24205776, 0.23828046, 0.25874835)
         img_size = 32
         
-    elif args.dataset == "Aircraft":
-        print(Fore.YELLOW+'*'*80)
-        logger.debug('Aircraft')
-        print('*'*80 + Style.RESET_ALL)  #0.4796, 0.5108, 0.5341] 0.2172, 0.2103, 0.2425
-        n_classes = 100
-        img_mean, img_std =(0.4796, 0.5108, 0.5341),(0.2172, 0.2103, 0.2425)
-        img_size = 224
-
-    elif args.dataset == "Cars":
-        print(Fore.YELLOW + '*' * 80)
-        logger.debug('Cars')
-        print('*' * 80 + Style.RESET_ALL)          #0.4708, 0.4602, 0.4550   0.2892, 0.2882, 0.2968
-        n_classes = 196
-        img_mean, img_std = (0.4708, 0.4602, 0.4550), (0.2892, 0.2882, 0.2968)
-        img_size = 224
-        
     data_info = dict()
     data_info['n_classes'] = n_classes
     data_info['stat'] = (img_mean, img_std)
@@ -114,18 +98,6 @@ def dataload(args, augmentations, normalize, data_info):
     elif args.dataset == 'CINIC':
         train_dataset = torchvision.datasets.ImageFolder(root=os.path.join(args.datapath, 'train'), transform=augmentations)
         val_dataset = torchvision.datasets.ImageFolder(root=os.path.join(args.datapath, 'valid'),
-                      transform=transforms.Compose([
-                      transforms.Resize((data_info['img_size'],data_info['img_size'])), transforms.ToTensor(), *normalize]))
-
-    elif args.dataset == 'Aircraft':
-        train_dataset = torchvision.datasets.ImageFolder(root=os.path.join(args.datapath, 'train'), transform=augmentations)
-        val_dataset = torchvision.datasets.ImageFolder(root=os.path.join(args.datapath, 'test'),
-                      transform=transforms.Compose([
-                      transforms.Resize((data_info['img_size'],data_info['img_size'])), transforms.ToTensor(), *normalize]))
-
-    elif args.dataset == 'Cars':
-        train_dataset = torchvision.datasets.ImageFolder(root=os.path.join(args.datapath, 'train'), transform=augmentations)
-        val_dataset = torchvision.datasets.ImageFolder(root=os.path.join(args.datapath, 'test'),
                       transform=transforms.Compose([
                       transforms.Resize((data_info['img_size'],data_info['img_size'])), transforms.ToTensor(), *normalize]))
     

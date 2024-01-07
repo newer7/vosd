@@ -26,7 +26,7 @@ import warnings
 warnings.filterwarnings("ignore", category=Warning)
 
 best_acc1 = 0
-MODELS = ['vit', 'swin', 'cait', 'life_vit', 'conemb_vit', 'vit_daff', 'swin_daff', 'conemb_swin', 'conemb_cait_impl', 'conemb_vit_daff', 'conemb_swin_daff', 'conemb_cait_daff']
+MODELS = ['vit', 'swin', 'cait', 'conemb_vit_daff', 'conemb_swin_daff', 'conemb_cait_daff']
 
 
 def init_parser():
@@ -36,7 +36,7 @@ def init_parser():
     parser.add_argument('--datapath', default='./data', type=str, help='dataset path')
 
     parser.add_argument('--dataset', default='CIFAR10',
-                        choices=['CIFAR10', 'CIFAR100', 'Tiny-Imagenet', 'SVHN', 'CINIC', 'Aircraft', 'Cars'], type=str,
+                        choices=['CIFAR10', 'CIFAR100', 'Tiny-Imagenet', 'SVHN', 'CINIC'], type=str,
                         help='small dataset path')
 
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
