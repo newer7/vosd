@@ -1,0 +1,4 @@
+timm==0.4.12
+pillow==8.4.0
+numpy==1.19.5
+einops==0.3.2
