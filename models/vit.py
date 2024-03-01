@@ -15,8 +15,6 @@ for some einops/einsum fun
 * Bert reference code checks against Huggingface Transformers and Tensorflow Bert
 Hacked together by / Copyright 2021 Ross Wightman
 # ------------------------------------------
-# Modification:
-# Added code for DHVT -- Copyright 2022 Zhiying Lu
 """
 import math
 import logging
