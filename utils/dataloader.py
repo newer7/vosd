@@ -13,7 +13,7 @@ def datainfo(logger, args):
         print('*'*80 + Style.RESET_ALL)
         n_classes = 10
         img_mean, img_std = (0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)
-        img_size = 224           #32        
+        img_size = 32                 
         
     elif args.dataset == 'CIFAR100':
         print(Fore.YELLOW+'*'*80)
